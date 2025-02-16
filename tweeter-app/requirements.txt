@@ -1,0 +1,7 @@
+pandas
+pyarrow
+fastparquet
+hdfs
+numpy
+Faker
+tweepy

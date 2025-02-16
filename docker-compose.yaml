@@ -1,0 +1,278 @@
+
+services:
+# Setting Up HDFS & YARN #
+  namenode:
+    image: mrugankray/namenode-spark-airflow-flume-zepplin:1.1
+    container_name: namenode
+    platform: linux/amd64
+    restart: always
+    ports:
+      - 9870:9870
+      - 9000:9000
+      - 8082:8082 # zeppelin ui
+      - 8080:8080 # spark master web ui
+      - 8081:8081 # spark slave web ui
+      - 4040:4040 # spark driver web ui
+      - 3000:3000 # airflow ui
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - hadoop_namenode_conda:/root/anaconda
+      - hadoop_namenode_spark:/opt/spark
+      - hadoop_namenode_zeppelin:/opt/zeppelin
+      - ./configs/zeppelin-site.xml:/opt/zeppelin/conf/zeppelin-site.xml
+      - ./configs/zeppelin-env.sh:/opt/zeppelin/conf/zeppelin-env.sh
+      - ./configs/namenode_bashrc.txt:/root/.bashrc
+      - ./configs/namenode_airflow.cfg:/root/airflow/airflow.cfg
+      - ./dags:/root/airflow/dags
+      - airflow_namenode:/root/airflow
+      - ./configs/namenode/flume/flume-env.sh:/opt/flume/conf/flume-env.sh
+      - ./flume_config/flume.conf:/opt/flume/conf/flume.conf
+      - hadoop_namenode_flume:/opt/flume
+    environment:
+      - CLUSTER_NAME=hadoop-learning
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  datanode:
+    image: mrugankray/datanode-python:1.0
+    container_name: datanode
+    platform: linux/amd64
+    restart: always
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+      - hadoop_datanode_conda:/root/anaconda
+      - ./configs/datanode_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+    ports:
+      - "9864:9864"
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop-net
+
+  resourcemanager:
+    image: mrugankray/resourcemanager-python:1.0
+    container_name: resourcemanager
+    platform: linux/amd64
+    restart: always
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - hadoop_resourcemanager_conda:/root/anaconda
+      - ./configs/resourcemanager_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864"
+    ports:
+      - "8088:8088"
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop-net
+
+  nodemanager:
+    image: mrugankray/nodemanager-python:1.0
+    container_name: nodemanager
+    platform: linux/amd64
+    restart: always
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - hadoop_nodemanager_conda:/root/anaconda
+      - ./configs/nodemanager_bashrc.txt:/root/.bashrc
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    ports:
+      - "8042:8042"
+      - "19888:19888" # to access job history
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop-net
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    platform: linux/amd64
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    ports:
+      - "8188:8188"
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop-net
+  
+  # Setting up Hive #
+  hive-server:
+    image: mrugankray/hive-server-sqoop:1.0
+    container_name: hive-server
+    platform: linux/amd64
+    depends_on:
+      - namenode
+      - datanode
+      - hive-metastore
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop_hive_server_sqoop:/usr/lib/sqoop
+      - ./configs/hive_server/sqoop-env.sh:/usr/lib/sqoop/conf/sqoop-env.sh
+      - ./configs/hive_server/hive_server_bashrc.txt:/root/.bashrc
+      - ./configs/hive_server/sqoop-site.xml:/usr/lib/sqoop/conf/sqoop-site.xml
+      - ./configs/hive_server/sshd_config.conf:/etc/ssh/sshd_config
+      - ./jsonserde.jar:/opt/hive/lib/json-serde
+    environment:
+      - HIVE_SERVER2_THRIFT_PORT=10000
+      - HIVE_METASTORE_URI=thrift://hive_metastore:9083
+      - HIVE_EXECUTION_ENGINE=spark # Ensure MapReduce engine is used
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionURL=jdbc:postgresql://hive-metastore/metastore
+      - SERVICE_PRECONDITION=hive-metastore:9083 # Ensure Metastore is available before starting Hive
+      - HIVE_EXEC_MODE_LOCAL_AUTO=true # Local execution mode
+      - HIVE_EXEC_PARALLEL=true # Enable parallel execution
+      - HIVE_MAPRED_MODE=debug # Debug mode for MapReduce
+      - MAPREDUCE_JOB_VERBOSE=true # Verbose MapReduce job logs
+      - MAPREDUCE_JOB_HISTORY_LOGS=true # Store job history logs
+    ports:
+      - 10000:10000
+    networks:
+      - hadoop-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    platform: linux/amd64
+    env_file:
+      - ./hadoop.env
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432"
+    ports:
+      - "9083:9083"
+    depends_on:
+      - hive-metastore-postgresql
+    networks:
+      - hadoop-net
+
+  hive-metastore-postgresql:
+    image: bde2020/hive-metastore-postgresql:2.3.0
+    container_name: hive-metastore-postgresql
+    platform: linux/amd64
+    networks:
+      - hadoop-net
+
+  # Hue #
+  huedb:
+    image: postgres:15.1-alpine3.17
+    container_name: huedb
+    platform: linux/amd64
+    volumes:
+      - hue_pg_data:/var/lib/postgresl/data/
+    env_file:
+      - ./hadoop.env
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432 hive-metastore:9083 hive-server:10000 resourcemanager:8088"
+      POSTGRES_USER: hue
+      POSTGRES_PASSWORD: hue
+      POSTGRES_DB: hue
+    depends_on:
+      hive-server:
+        condition: service_healthy
+    networks:
+      - hadoop-net
+
+  hue:
+    image: gethue/hue:4.6.0
+    container_name: hue
+    platform: linux/amd64
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 hive-metastore-postgresql:5432 hive-metastore:9083 hive-server:10000 resourcemanager:8088"
+    ports:
+      - "8888:8888"
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - ./hue-overrides.ini:/usr/share/hue/desktop/conf/hue-overrides.ini
+    depends_on:
+      - huedb
+    networks:
+      - hadoop-net
+  
+  transaction-app:
+    build: 
+      context: ./transaction-app
+      dockerfile: Dockerfile
+    container_name: transaction-app
+    platform: linux/amd64
+    volumes:
+      - transaction-app:/app 
+    working_dir: /app
+    depends_on:
+      namenode:
+        condition: service_healthy
+    command: ["python", "data_ingestion.py"]
+    networks:
+      - hadoop-net
+    restart: on-failure
+  
+  tweeter-app:
+    build: 
+      context: ./tweeter-app
+      dockerfile: Dockerfile
+    container_name: tweeter-app
+    platform: linux/amd64
+    volumes:
+      - tweeter-app:/app 
+    working_dir: /app
+    depends_on:
+      namenode:
+        condition: service_healthy
+    command: ["python", "data_ingestion.py"]
+    networks:
+      - hadoop-net
+    restart: on-failure
+
+volumes:
+  hadoop_namenode:
+  hadoop_namenode_conda:
+  hadoop_namenode_spark:
+  hadoop_namenode_zeppelin:
+  hadoop_namenode_flume:
+  hadoop_datanode:
+  hadoop_datanode_conda:
+  hadoop_resourcemanager_conda:
+  hadoop_nodemanager_conda:
+  hadoop_historyserver:
+  airflow_namenode:
+  hadoop_hive_server_sqoop:
+  hue_pg_data:
+  tweeter-app:
+  transaction-app:
+    driver: local
+
+networks:
+  hadoop-net:
+    driver: bridge

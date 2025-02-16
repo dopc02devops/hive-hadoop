@@ -1,0 +1,5 @@
+# Ignore venv folder
+venv
+
+# Ignore Miniconda3.sh file
+Miniconda3.sh
